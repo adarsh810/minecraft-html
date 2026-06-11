@@ -370,10 +370,23 @@ interface ChunkMaterials {
 
 function makeChunkMaterials(atlas: THREE.CanvasTexture): ChunkMaterials {
   return {
-    solid:  new THREE.MeshLambertMaterial({ map: atlas }),
-    leaves: new THREE.MeshLambertMaterial({ map: atlas, alphaTest: 0.5, side: THREE.DoubleSide, transparent: true }),
+    solid:  new THREE.MeshLambertMaterial({ map: atlas, vertexColors: true }),
+    leaves: new THREE.MeshLambertMaterial({ map: atlas, vertexColors: true, alphaTest: 0.5, side: THREE.DoubleSide, transparent: true }),
     water:  new THREE.MeshLambertMaterial({ map: atlas, transparent: true, opacity: 0.7, side: THREE.DoubleSide }),
   };
+}
+
+// Per-face brightness multiplier (simulates ambient occlusion + directional shading)
+const FACE_SHADE: Record<string, number> = {
+  top: 1.0, bottom: 0.45, side_px: 0.80, side_nx: 0.70, side_pz: 0.85, side_nz: 0.75,
+};
+function faceShadeKey(n: V3): string {
+  if (n[1] === 1)  return 'top';
+  if (n[1] === -1) return 'bottom';
+  if (n[0] === 1)  return 'side_px';
+  if (n[0] === -1) return 'side_nx';
+  if (n[2] === 1)  return 'side_pz';
+  return 'side_nz';
 }
 
 function buildChunkGroup(
@@ -381,9 +394,9 @@ function buildChunkGroup(
   cx: number, cy: number, cz: number,
   mats: ChunkMaterials,
 ): THREE.Group {
-  const sPos: number[] = [], sUV: number[] = [], sIdx: number[] = [];
-  const lPos: number[] = [], lUV: number[] = [], lIdx: number[] = [];
-  const wPos: number[] = [], wUV: number[] = [], wIdx2: number[] = [];
+  const sPos: number[] = [], sUV: number[] = [], sCol: number[] = [], sNorm: number[] = [], sIdx: number[] = [];
+  const lPos: number[] = [], lUV: number[] = [], lCol: number[] = [], lNorm: number[] = [], lIdx: number[] = [];
+  const wPos: number[] = [], wUV: number[] = [], wNorm: number[] = [], wIdx2: number[] = [];
   let si = 0, li = 0, wi = 0;
 
   const ox = cx * CHUNK, oy = cy * CHUNK, oz = cz * CHUNK;
@@ -413,9 +426,12 @@ function buildChunkGroup(
 
           const isWater  = b === WATER;
           const isLeaves = b === LEAVES;
+          const shade = FACE_SHADE[faceShadeKey(f.n)];
 
           const pos  = isWater ? wPos  : isLeaves ? lPos  : sPos;
           const uvA  = isWater ? wUV   : isLeaves ? lUV   : sUV;
+          const col  = isWater ? null  : isLeaves ? lCol  : sCol;
+          const norm = isWater ? wNorm : isLeaves ? lNorm : sNorm;
           const idx  = isWater ? wIdx2 : isLeaves ? lIdx  : sIdx;
           const base = isWater ? wi    : isLeaves ? li     : si;
 
@@ -424,6 +440,10 @@ function buildChunkGroup(
             const wvy = (isWater && f.n[1] === 1) ? wy + 0.875 : wy + vy;
             pos.push(wx2 + vx, wvy, wz + vz);
             uvA.push(uvs[vi * 2], uvs[vi * 2 + 1]);
+            // Explicit flat normal (no averaging — fixes Lambert shading on voxels)
+            norm.push(f.n[0], f.n[1], f.n[2]);
+            // Per-face vertex color for AO-like depth
+            if (col) col.push(shade, shade, shade);
           }
           idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
 
@@ -435,20 +455,24 @@ function buildChunkGroup(
     }
   }
 
-  function makeMesh(pos: number[], uvA: number[], idx: number[], mat: THREE.MeshLambertMaterial): THREE.Mesh | null {
+  function makeMesh(
+    pos: number[], uvA: number[], norm: number[], idx: number[],
+    col: number[] | null, mat: THREE.MeshLambertMaterial,
+  ): THREE.Mesh | null {
     if (idx.length === 0) return null;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     geo.setAttribute('uv',       new THREE.Float32BufferAttribute(uvA, 2));
+    geo.setAttribute('normal',   new THREE.Float32BufferAttribute(norm, 3));
+    if (col) geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
     geo.setIndex(idx);
-    geo.computeVertexNormals();
     return new THREE.Mesh(geo, mat);
   }
 
   const group = new THREE.Group();
-  const sm = makeMesh(sPos, sUV, sIdx, mats.solid);
-  const lm = makeMesh(lPos, lUV, lIdx, mats.leaves);
-  const wm = makeMesh(wPos, wUV, wIdx2, mats.water);
+  const sm = makeMesh(sPos, sUV, sNorm, sIdx, sCol, mats.solid);
+  const lm = makeMesh(lPos, lUV, lNorm, lIdx, lCol, mats.leaves);
+  const wm = makeMesh(wPos, wUV, wNorm, wIdx2, null, mats.water);
   if (sm) group.add(sm);
   if (lm) group.add(lm);
   if (wm) group.add(wm);
@@ -616,7 +640,7 @@ export default function MinecraftGame() {
     // ── Scene ──────────────────────────────────────────────────
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x87CEEB);
-    scene.fog = new THREE.FogExp2(0x87CEEB, 0.015);
+    scene.fog = new THREE.FogExp2(0x87CEEB, 0.008);
 
     const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.05, 300);
 
@@ -625,12 +649,12 @@ export default function MinecraftGame() {
     renderer.setSize(window.innerWidth, window.innerHeight);
     container.appendChild(renderer.domElement);
 
-    // Lighting
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.65);
+    // Lighting — ambient provides base fill, sun at fixed good angle for side-face depth
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.9);
     scene.add(ambientLight);
 
-    const sunLight = new THREE.DirectionalLight(0xfffde7, 0.9);
-    sunLight.position.set(50, 80, 30);
+    const sunLight = new THREE.DirectionalLight(0xfff5e0, 0.6);
+    sunLight.position.set(1, 2, 0.8); // fixed angle: top-lit with good side contrast
     scene.add(sunLight);
 
     // Sun / Moon meshes
@@ -717,7 +741,7 @@ export default function MinecraftGame() {
 
     const pos = spawnPos.clone();
     const vel = new THREE.Vector3();
-    let yaw = 0, pitch = 0;
+    let yaw = 0, pitch = -0.25; // look slightly downward to see terrain
     let onGround = false;
     let hpRef = 20;
     let deadRef = false;
@@ -930,9 +954,10 @@ export default function MinecraftGame() {
       (scene.fog as THREE.FogExp2).color.copy(sky);
 
       const isDay   = dayTimeRef > 0.15 && dayTimeRef < 0.85;
-      const ambInt  = isDay ? 0.65 : 0.12;
+      const ambInt  = isDay ? 0.9 : 0.18;
       ambientLight.intensity += (ambInt - ambientLight.intensity) * Math.min(1, dt * 2);
-      sunLight.intensity = isDay ? 0.9 : 0.0;
+      sunLight.intensity = isDay ? 0.6 : 0.0;
+      // sun position stays fixed for correct side-face lighting
 
       // Sun/moon orbit
       const angle = dayTimeRef * Math.PI * 2;
@@ -946,7 +971,7 @@ export default function MinecraftGame() {
         pos.y - Math.sin(angle) * 80,
         pos.z,
       );
-      sunLight.position.copy(sunMesh.position);
+      // sunLight.position stays fixed — only the visual sun mesh orbits
 
       // ── Player physics ────────────────────────────────────────
       const inWaterBlock = getBlock(world, Math.floor(pos.x), Math.floor(pos.y + 0.5), Math.floor(pos.z));
