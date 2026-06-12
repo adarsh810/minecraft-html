@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#5BA83C"/>
+  <rect x="0" y="256" width="512" height="256" fill="#8B6340"/>
+  <rect x="0" y="192" width="512" height="128" fill="#5BA83C" opacity="0.5"/>
+  <text x="256" y="368.64" text-anchor="middle" font-size="230.4" font-family="monospace" font-weight="bold" fill="white">⛏</text>
+</svg>
